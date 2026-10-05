@@ -33,7 +33,7 @@ Utiliser **une seule instance** du service par compte : le statut lu/non lu sur 
 | `ECOLEDIRECTE_IDENTIFIANT` | Obligatoire : identifiant de connexion |
 | `ECOLEDIRECTE_MDP` | Obligatoire : mot de passe |
 | `DISCORD_WEBHOOK_URL` | Obligatoire : URL HTTPS du webhook |
-| `ECOLEDIRECTE_PROFILE` | `A` : profil demandé ; accepte `P` ou `A` |
+| `ECOLEDIRECTE_PROFILE` | `A` (personnel) ; choisir `P` pour le profil enseignant |
 | `ECOLEDIRECTE_ACCOUNT_ID` | Facultatif : ID ou UID du compte de **connexion**, avant changement de profil |
 | `ECOLEDIRECTE_API_BASE_URL` | `https://api.ecoledirecte.com/v3` : login et renouvellement |
 | `ECOLEDIRECTE_APIP_BASE_URL` | `https://apip.ecoledirecte.com/v3` : messagerie |
@@ -45,7 +45,7 @@ Utiliser **une seule instance** du service par compte : le statut lu/non lu sur 
 | `DISCORD_USERNAME` | `EcoleDirecte` ; nom affiché par le webhook |
 | `DISCORD_THREAD_ID` | Facultatif : ID du fil destinataire |
 
-Sans `ECOLEDIRECTE_ACCOUNT_ID`, le service choisit le premier compte du profil demandé, puis le premier compte P/A disponible si un changement de profil est nécessaire. La convention P/A et le corps `{ profil, uid, uuid }` reprennent le code SAC : le service demande exactement la lettre configurée à EcoleDirecte, sans déduire un rôle de son libellé.
+Sans `ECOLEDIRECTE_ACCOUNT_ID`, le service choisit le premier compte du profil demandé, puis le premier compte P/A disponible si un changement de profil est nécessaire. Le changement reprend le corps `{ profil, uid, uuid }` de SAC. Selon les constantes du client web officiel, **A = personnel** et **P = enseignant**. La lecture et le passage en lu utilisent donc `/personnels/{id}/messages.awp` pour A et `/enseignants/{id}/messages.awp` pour P, avec l'identifiant et le token du profil actif. Pour passer d'un compte personnel au profil enseignant, configurer `ECOLEDIRECTE_PROFILE=P`.
 
 ## Notifications et reprise
 
@@ -82,6 +82,8 @@ Les erreurs indiquent désormais l'étape (`initialisation GTK`, `connexion`, `c
 
 Par exemple, `initialisation GTK : HTTP 403 (réponse HTML)` signifie que le refus arrive avant toute transmission du mot de passe. `connexion : API 250` indique une validation interactive de connexion. `lecture des messages : HTTP 403` situe le refus après authentification et sélection du profil ; le seul code ne permet pas de décider s'il vient du filtrage réseau ou des droits du compte.
 
+Un `lecture des messages : API 403` peut venir d'une route incompatible avec le profil. L'ancienne version utilisait systématiquement `/enseignants`, même avec A : ce défaut est corrigé. Si le refus persiste avec la route correspondant au profil, vérifier les droits de messagerie du compte et le profil demandé sur EcoleDirecte.
+
 Le client transmet `Origin` et `Referer` EcoleDirecte, conserve les cookies de session uniquement en mémoire et les actualise à chaque réponse. Le GET initial GTK ne comporte pas d'en-tête `Content-Type` de formulaire, réservé aux POST.
 
 Après mise à jour, reconstruire l'image locale avec `docker compose up -d --build`, puis consulter `docker compose logs --tail=30 notifier`. Si vous utilisez une image publiée plutôt que le build local, il faut publier la nouvelle version et recréer le conteneur avec cette image ; reconstruire localement ne met pas automatiquement à jour le registre.
@@ -96,4 +98,4 @@ L'API EcoleDirecte reprise du dépôt doit être vérifiée avec votre compte. U
 
 Références Discord : [exécution des webhooks](https://docs.discord.com/developers/resources/webhook#execute-webhook) et [limites des embeds](https://docs.discord.com/developers/resources/message#embed-limits).
 
-Format de l'action de passage en lu vérifié dans [le client wrapdirecte 0.3.1](https://unpkg.com/wrapdirecte@0.3.1/dist/index.mjs) (module élèves). Le même format est appliqué à la route enseignants utilisée par SAC ; cette adaptation et la sélection implicite de l'année restent à confirmer avec votre compte réel. `ECOLEDIRECTE_MESSAGES_YEAR` permet de fixer l'année explicitement si nécessaire.
+Routes de profils et action de passage en lu vérifiées dans [le code du client web officiel EcoleDirecte](https://www.ecoledirecte.com/chunk-JGSLBWTI.js), consulté le 5 octobre 2026 : mapping `A: personnels`, `P: enseignants`, méthodes `getUnreadMessages`, `markMessagesAsRead` et `swipeProfil`. Ce fichier peut changer avec les mises à jour du site. La sélection implicite de l'année reste à confirmer avec votre compte réel ; `ECOLEDIRECTE_MESSAGES_YEAR` permet de fixer l'année explicitement si nécessaire.

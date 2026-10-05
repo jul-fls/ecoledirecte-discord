@@ -32,7 +32,8 @@ test('login P vers A : GTK, UID, token et ID du profil renouvelé', async () => 
   assert.equal(calls[1].options.headers['X-Gtk'], 'test-gtk');
   assert.equal(calls[1].options.headers.Cookie, 'GTK=test-gtk');
   assert.deepEqual(JSON.parse(calls[2].options.body.get('data')), { profil: 'A', uid: 'uid', uuid: '' });
-  assert.match(calls[3].url.pathname, /enseignants\/42\/messages.awp/);
+  assert.match(calls[3].url.pathname, /personnels\/42\/messages.awp/);
+  assert.equal(ed.profile, 'A');
   assert.equal(calls[3].url.searchParams.get('getAll'), '1');
   assert.equal(calls[3].options.headers['X-Token'], 'teacher');
   assert.equal(ed.token, 'rotated');
@@ -67,7 +68,7 @@ test('token expiré : reconnexion puis reconstruction de l’URL', async () => {
   const ed = new EcoleDirecte(config(), async url => { urls.push(url); return responses.shift(); });
   ed.token = 'expired'; ed.id = 1;
   await ed.unreadMessages();
-  assert.match(urls.at(-1).pathname, /enseignants\/77\//);
+  assert.match(urls.at(-1).pathname, /personnels\/77\//);
 });
 
 test('reconnexion bornée et format inattendu signalé', async () => {
@@ -140,7 +141,7 @@ test('passage en lu : action, identifiant, année et token renouvelé', async ()
   });
   ed.token = 'old'; ed.id = 42; ed.messagesYear = '2026-2027';
   await ed.markAsRead({ id: 7 });
-  assert.equal(calls[0].url.pathname, '/v3/enseignants/42/messages.awp');
+  assert.equal(calls[0].url.pathname, '/v3/personnels/42/messages.awp');
   assert.equal(calls[0].url.searchParams.get('verbe'), 'put');
   assert.equal(calls[0].options.headers['X-Token'], 'old');
   assert.deepEqual(JSON.parse(calls[0].options.body.get('data')), {
@@ -156,7 +157,7 @@ test('expiration pendant le passage en lu : reconnexion sans renvoyer sur Discor
   const ed = new EcoleDirecte(config(), async (url, options) => { calls.push({ url, options }); return responses.shift(); });
   ed.token = 'expired'; ed.id = 1;
   await ed.markAsRead({ id: 7, anneeMessages: '2026-2027' });
-  assert.match(calls.at(-1).url.pathname, /enseignants\/77\//);
+  assert.match(calls.at(-1).url.pathname, /personnels\/77\//);
   assert.equal(JSON.parse(calls.at(-1).options.body.get('data')).anneeMessages, '2026-2027');
   assert.equal(calls.at(-1).options.headers['X-Token'], 'new');
 });
@@ -248,4 +249,50 @@ test('code API non numérique non propagé comme texte distant', async () => {
   const ed = new EcoleDirecte(config(), async () => json({ code: 'secret-token' }));
   await assert.rejects(ed.request(new URL('https://api.ecoledirecte.com'), {}), error =>
     error.message.includes('inconnu') && !error.message.includes('secret-token'));
+});
+
+test('profil enseignant P : même route enseignants pour lecture et passage en lu', async () => {
+  const cfg = { ...config(), profile: 'P' };
+  const calls = [];
+  const responses = [gtk(), json({ code: 200, token: 'p-token', data: { accounts: [{ typeCompte: 'P', id: 17 }] } }),
+    json({ code: 200, data: { messages: { received: [{ id: 5, read: false }] } } }), json({ code: 200 })];
+  const ed = new EcoleDirecte(cfg, async (url, options) => { calls.push({ url, options }); return responses.shift(); });
+  const [message] = await ed.unreadMessages();
+  await ed.markAsRead(message);
+  assert.equal(ed.profile, 'P');
+  assert.equal(calls[2].url.pathname, '/v3/enseignants/17/messages.awp');
+  assert.equal(calls[3].url.pathname, calls[2].url.pathname);
+  assert.equal(calls[3].url.searchParams.get('verbe'), 'put');
+});
+
+test('changement A vers P : nouvelle identité enseignant pour la messagerie', async () => {
+  const calls = [];
+  const responses = [gtk(), json({ code: 200, token: 'a', data: { accounts: [{ typeCompte: 'A', id: 1, uid: 'uid' }] } }),
+    json({ code: 200, token: 'p', data: { id: 99, typeCompte: 'P' } }),
+    json({ code: 200, data: { messages: { received: [] } } })];
+  const ed = new EcoleDirecte({ ...config(), profile: 'P' }, async (url, options) => { calls.push({ url, options }); return responses.shift(); });
+  await ed.unreadMessages();
+  assert.equal(ed.profile, 'P');
+  assert.equal(calls.at(-1).url.pathname, '/v3/enseignants/99/messages.awp');
+  assert.equal(calls.at(-1).options.headers['X-Token'], 'p');
+});
+
+test('profil A inchangé : route personnels sans changement de profil', async () => {
+  const urls = [];
+  const responses = [gtk(), json({ code: 200, token: 'a', data: { accounts: [{ typeCompte: 'A', id: 3 }] } }),
+    json({ code: 200, data: { messages: { received: [] } } }), json({ code: 200 })];
+  const ed = new EcoleDirecte(config(), async url => { urls.push(url); return responses.shift(); });
+  await ed.unreadMessages();
+  await ed.markAsRead({ id: 4 });
+  assert.equal(urls[2].pathname, '/v3/personnels/3/messages.awp');
+  assert.equal(urls[3].pathname, urls[2].pathname);
+  assert.ok(urls.every(url => !url.pathname.includes('renewtoken')));
+});
+
+test('profil renvoyé contraire à la demande : aucun accès à la mauvaise messagerie', async () => {
+  const responses = [gtk(), json({ code: 200, token: 'a', data: { accounts: [{ typeCompte: 'A', id: 1 }] } }),
+    json({ code: 200, token: 'still-a', data: { id: 1, typeCompte: 'A' } })];
+  const ed = new EcoleDirecte({ ...config(), profile: 'P' }, async () => responses.shift());
+  await assert.rejects(ed.unreadMessages(), /profil non confirmé/);
+  assert.equal(ed.token, null);
 });

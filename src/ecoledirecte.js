@@ -26,6 +26,7 @@ export class EcoleDirecte {
     this.fetch = fetchImpl;
     this.token = null;
     this.cookies = new Map();
+    this.profile = null;
   }
 
   rememberCookies(response) {
@@ -74,6 +75,7 @@ export class EcoleDirecte {
 
   async login() {
     this.token = null;
+    this.profile = null;
     this.cookies.clear();
     const response = await this.fetch(this.url(this.config.api, 'login.awp', { gtk: '1' }), {
       headers: HEADERS, signal: AbortSignal.timeout(this.config.timeoutMs), redirect: 'error',
@@ -96,19 +98,35 @@ export class EcoleDirecte {
       ? accounts.find(a => String(a.id) === this.config.accountId || String(a.uid) === this.config.accountId)
       : accounts.find(a => a.typeCompte === this.config.profile)
         || accounts.find(a => ['P', 'A'].includes(a.typeCompte));
-    if (!account || !result.token) throw new Error('EcoleDirecte : compte P/A ou token introuvable (vérifier ECOLEDIRECTE_ACCOUNT_ID)');
+    if (!account || !['P', 'A'].includes(account.typeCompte) || !result.token) {
+      throw new Error('EcoleDirecte : compte P/A ou token introuvable (vérifier ECOLEDIRECTE_ACCOUNT_ID)');
+    }
     let token = result.token;
     let id = account.id;
+    let profile = account.typeCompte;
     if (account.typeCompte !== this.config.profile) {
       const switched = await this.request(this.url(this.config.api, 'renewtoken.awp', { verbe: 'put' }), {
         profil: this.config.profile, uid: account.uid ?? account.id, uuid: '',
       }, { 'X-Token': token }, `changement de profil vers ${this.config.profile}`);
       token = switched.token;
       id = switched.data?.id;
+      profile = switched.data?.typeCompte || this.config.profile;
+      if (profile !== this.config.profile) {
+        throw new Error('EcoleDirecte : changement de profil non confirmé par le serveur');
+      }
     }
     if (!token || id == null) throw new Error('EcoleDirecte : profil sans token ou identifiant');
     this.id = id;
     this.token = token;
+    this.profile = profile;
+  }
+
+  messageEndpoint(id) {
+    // Correspondance du client web officiel : A = personnel, P = enseignant.
+    const routes = { A: 'personnels', P: 'enseignants' };
+    const route = routes[this.profile || this.config.profile];
+    if (!route) throw new Error('EcoleDirecte : profil de messagerie non pris en charge');
+    return `${route}/${encodeURIComponent(id)}/messages.awp`;
   }
 
   async authenticatedRequest(endpoint, data, params, operation) {
@@ -131,7 +149,7 @@ export class EcoleDirecte {
 
   async unreadMessages() {
     const result = await this.authenticatedRequest(
-      id => `enseignants/${encodeURIComponent(id)}/messages.awp`,
+      id => this.messageEndpoint(id),
       { anneeMessages: this.config.messagesYear || '' }, {
         force: 'true', typeRecuperation: 'received', idClasseur: '0',
         orderBy: 'date', order: 'desc', query: '', onlyRead: '', getAll: '1', verbe: 'get',
@@ -146,7 +164,7 @@ export class EcoleDirecte {
     if (message.id == null || String(message.id) === '') throw new Error('EcoleDirecte : message sans identifiant');
     // Même action que le bouton « Marquer comme lu », sans ouvrir le détail avant l'envoi Discord.
     await this.authenticatedRequest(
-      id => `enseignants/${encodeURIComponent(id)}/messages.awp`, {
+      id => this.messageEndpoint(id), {
         action: 'marquerCommeLu', ids: [message.id],
         anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
       }, { verbe: 'put' }, 'passage du message en lu');
