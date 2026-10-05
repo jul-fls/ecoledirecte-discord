@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readConfig } from '../src/config.js';
 import { EcoleDirecte } from '../src/ecoledirecte.js';
-import { Discord } from '../src/discord.js';
+import { Discord, buildNotification } from '../src/discord.js';
 import { pollOnce } from '../src/poller.js';
 
 const config = () => readConfig({ ECOLEDIRECTE_IDENTIFIANT: 'test', ECOLEDIRECTE_MDP: 'secret',
@@ -132,4 +132,52 @@ test('toutes les parties Discord doivent réussir avant le passage définitif en
   const ed = { unreadMessages: async () => [{ id: 1 }], prepareMessage: async () => message, markAsRead: async () => read++ };
   await assert.rejects(pollOnce({ ed, discord }), /500/);
   assert.equal(read, 0);
+});
+
+async function prepareEncodedContent(content) {
+  const responses = [json({ code: 200, data: { content, files: [] } }), json({ code: 200 })];
+  const ed = new EcoleDirecte(config(), async () => responses.shift());
+  ed.token = 'token'; ed.id = 1;
+  return ed.prepareMessage({ id: 7 });
+}
+
+test('extrait réel ED : base64 replié et entités HTML donnent du texte lisible', async () => {
+  const content = 'PHA+Qm9uam91ciAmIzIyNDsg\r\n\t dG91cyw8L3A+\n';
+  const message = await prepareEncodedContent(content);
+  assert.equal(message.content, '<p>Bonjour &#224; tous,</p>');
+  assert.equal(buildNotification(message, config()).payload.embeds[0].description, 'Bonjour à tous,');
+});
+
+test('base64 MIME avec CRLF, espaces et tabulations : embed et TXT sont décodés', async () => {
+  const text = 'Prévenir les élèves de la modification. '.repeat(160);
+  const html = `<p>${text}</p>`;
+  const wrapped = '\r\n ' + Buffer.from(html).toString('base64').match(/.{1,76}/g).join('\r\n\t ') + '\n';
+  const message = await prepareEncodedContent(wrapped);
+  assert.equal(message.content, html);
+  const discord = new Discord(config(), async (_url, options) => {
+    const payload = JSON.parse(options.body.get('payload_json'));
+    assert.match(payload.embeds[0].description, /^Prévenir les élèves/);
+    assert.equal(await options.body.get('files[0]').text(), text.trim());
+    return json({ id: 'ok' });
+  });
+  await discord.send(message);
+});
+
+test('base64 sans padding et texte HTML/brut sont acceptés', async () => {
+  const html = '<p>École : nouvelle information</p>';
+  const message = await prepareEncodedContent(Buffer.from(html).toString('base64').replace(/=+$/, ''));
+  assert.equal(message.content, html);
+  for (const content of [html, 'Bonjour à tous,\nInformation de rentrée.', 'test']) {
+    assert.equal((await prepareEncodedContent(content)).content, content);
+  }
+});
+
+test('grosse signature avec image base64 : ni code image ni base64 dans la notification', async () => {
+  const html = `<p>Bonjour &#224; tous,</p><img src="data:image/png;base64,${'a'.repeat(1600000)}"><p>Signature</p>`;
+  const wrapped = Buffer.from(html).toString('base64').match(/.{1,76}/g).join('\r\n');
+  const message = await prepareEncodedContent(wrapped);
+  assert.equal(message.content, html);
+  const notification = buildNotification(message, config());
+  assert.equal(notification.payload.embeds[0].description, 'Bonjour à tous,\nSignature');
+  assert.equal(notification.fullText, null);
 });

@@ -22,9 +22,16 @@ class EdError extends Error {
 
 function decodeContent(content) {
   if (typeof content !== 'string') throw new Error('EcoleDirecte : contenu du message absent ou invalide');
-  if (!content || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) return content;
+  // ED peut replier le base64 façon MIME (CRLF, espaces, tabulations).
+  // Éviter aussi les groupes regex répétés par quartet : gros HTML/signatures = plusieurs Mo.
+  const compact = content.replace(/\s/g, '');
+  if (!compact || !/^[A-Za-z0-9+/]+={0,2}$/.test(compact) || compact.length % 4 === 1
+      || (compact.includes('=') && compact.length % 4 !== 0)) return content;
   try {
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(content, 'base64'));
+    const bytes = Buffer.from(compact, 'base64');
+    // Validation canonique avant décodage ; les caractères ignorés par Buffer ne doivent pas transformer du texte brut.
+    if (bytes.toString('base64').replace(/=+$/, '') !== compact.replace(/=+$/, '')) return content;
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     return /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(decoded) ? content : decoded;
   } catch { return content; }
 }
