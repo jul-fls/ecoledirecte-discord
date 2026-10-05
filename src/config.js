@@ -29,14 +29,19 @@ export function readConfig(env = process.env) {
   if (username.length > 80) throw new Error('DISCORD_USERNAME : 80 caractères maximum');
   const messagesYear = env.ECOLEDIRECTE_MESSAGES_YEAR || '';
   if (messagesYear && !/^\d{4}-\d{4}$/.test(messagesYear)) throw new Error('ECOLEDIRECTE_MESSAGES_YEAR : format AAAA-AAAA requis');
+  const timeZone = env.ECOLEDIRECTE_TIMEZONE || 'Europe/Paris';
+  try { new Intl.DateTimeFormat('fr-FR', { timeZone }); }
+  catch { throw new Error('ECOLEDIRECTE_TIMEZONE : fuseau horaire IANA invalide'); }
   return {
     identifier: required('ECOLEDIRECTE_IDENTIFIANT'), password: required('ECOLEDIRECTE_MDP'),
-    profile, accountId: env.ECOLEDIRECTE_ACCOUNT_ID || '', encoding, messagesYear,
+    profile, accountId: env.ECOLEDIRECTE_ACCOUNT_ID || '', encoding, messagesYear, timeZone,
     api: httpsUrl('ECOLEDIRECTE_API_BASE_URL', 'https://api.ecoledirecte.com/v3').href.replace(/\/$/, ''),
     apip: httpsUrl('ECOLEDIRECTE_APIP_BASE_URL', 'https://apip.ecoledirecte.com/v3').href.replace(/\/$/, ''),
     version: env.ECOLEDIRECTE_API_VERSION || '4.98.0', webhook: webhook.href, username,
     threadId: env.DISCORD_THREAD_ID || '',
     intervalMs: integer('POLL_INTERVAL_SECONDS', 60, 10, 86400) * 1000,
     timeoutMs: integer('REQUEST_TIMEOUT_SECONDS', 20, 1, 120) * 1000,
+    attachmentMaxBytes: integer('ATTACHMENT_MAX_MB', 10, 1, 24) * 1024 * 1024,
+    attachmentsTotalMaxBytes: integer('ATTACHMENTS_TOTAL_MAX_MB', 64, 1, 1024) * 1024 * 1024,
   };
 }

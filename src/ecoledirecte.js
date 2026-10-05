@@ -20,6 +20,19 @@ class EdError extends Error {
   }
 }
 
+function decodeContent(content) {
+  if (typeof content !== 'string') throw new Error('EcoleDirecte : contenu du message absent ou invalide');
+  if (!content || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) return content;
+  try {
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(content, 'base64'));
+    return /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(decoded) ? content : decoded;
+  } catch { return content; }
+}
+
+export function safeFilename(name) {
+  return String(name || 'piece-jointe').replace(/[\x00-\x1f\x7f/\\:"<>|?*]/g, '_').slice(0, 200) || 'piece-jointe';
+}
+
 export class EcoleDirecte {
   constructor(config, fetchImpl = fetch) {
     this.config = config;
@@ -168,5 +181,105 @@ export class EcoleDirecte {
         action: 'marquerCommeLu', ids: [message.id],
         anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
       }, { verbe: 'put' }, 'passage du message en lu');
+  }
+
+  async markAsUnread(message) {
+    await this.authenticatedRequest(id => this.messageEndpoint(id), {
+      action: 'marquerCommeNonLu', ids: [message.id],
+      anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
+    }, { verbe: 'put' }, 'restauration du message en non lu');
+  }
+
+  async messageDetail(message) {
+    let result;
+    try {
+      result = await this.authenticatedRequest(id => this.messageEndpoint(id)
+        .replace(/messages\.awp$/, `messages/${encodeURIComponent(message.id)}.awp`), {
+          anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
+        }, { verbe: 'get', mode: 'destinataire' }, 'récupération du contenu du message');
+    } finally {
+      // Le GET de détail ED peut marquer lu, même si la réponse est perdue.
+      // Restaurer avant tout téléchargement/envoi, également lorsque le GET échoue.
+      await this.markAsUnread(message);
+    }
+    const detail = result.data;
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) throw new Error('EcoleDirecte : détail du message invalide');
+    return { ...message, ...detail, id: message.id, read: false,
+      anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
+      content: decodeContent(detail.content), contentEncoding: 'plain' };
+  }
+
+  async downloadAttachment(file, message, maxBytes) {
+    if (file.id == null || String(file.id) === '') throw new Error('EcoleDirecte : pièce jointe sans identifiant');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (!this.token) await this.login();
+      const response = await this.fetch(this.url(this.config.apip, 'telechargement.awp', {
+        verbe: 'get', fichierId: String(file.id), leTypeDeFichier: 'PIECE_JOINTE',
+      }), {
+        method: 'POST', headers: { ...HEADERS, ...this.cookieHeaders(), 'X-Token': this.token,
+          'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ data: JSON.stringify({ forceDownload: 0,
+          anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
+        }) }), signal: AbortSignal.timeout(this.config.timeoutMs), redirect: 'error',
+      });
+      const edCode = Number(response.headers.get('x-code') || 200);
+      if (([520, 521, 525].includes(edCode) || response.status === 401) && attempt === 0) {
+        await response.body?.cancel(); this.token = null; continue;
+      }
+      await this.checkHttp(response, 'téléchargement de pièce jointe');
+      if (edCode !== 200) {
+        await response.body?.cancel();
+        throw new EdError(Number.isInteger(edCode) ? edCode : 'inconnu', 'téléchargement de pièce jointe', 'API');
+      }
+      this.rememberCookies(response);
+      const token = response.headers.get('x-token');
+      if (token) this.token = token;
+      const disposition = response.headers.get('content-disposition') || '';
+      const utf8Name = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+      let serverName = /filename="([^"]+)"|filename=([^;]+)/i.exec(disposition);
+      serverName = serverName?.[1] || serverName?.[2]?.trim();
+      if (utf8Name) { try { serverName = decodeURIComponent(utf8Name); } catch { /* Utiliser le nom classique. */ } }
+      let name = serverName || file.libelle || file.nom || file.name || `piece-jointe-${file.id}`;
+      const extension = String(file.extension || '').replace(/^\./, '');
+      if (!serverName && /^[a-z0-9]{1,10}$/i.test(extension) && !String(name).toLowerCase().endsWith(`.${extension.toLowerCase()}`)) name += `.${extension}`;
+      const filename = safeFilename(name);
+      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      if (/text\/html/i.test(contentType) && !response.headers.get('content-disposition') && !/\.html?$/i.test(filename)) {
+        await response.body?.cancel();
+        throw new Error('EcoleDirecte : téléchargement de pièce jointe : page HTML reçue au lieu du fichier');
+      }
+      if (Number(response.headers.get('content-length')) > maxBytes) {
+        await response.body?.cancel();
+        throw new Error('EcoleDirecte : pièce jointe trop volumineuse (limite ATTACHMENT_MAX_MB / ATTACHMENTS_TOTAL_MAX_MB)');
+      }
+      if (!response.body) throw new Error('EcoleDirecte : téléchargement de pièce jointe vide');
+      const reader = response.body.getReader(); const chunks = []; let size = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) {
+          await reader.cancel();
+          throw new Error('EcoleDirecte : pièce jointe trop volumineuse (limite ATTACHMENT_MAX_MB / ATTACHMENTS_TOTAL_MAX_MB)');
+        }
+        chunks.push(value);
+      }
+      return { filename, blob: new Blob(chunks, { type: contentType }) };
+    }
+  }
+
+  async prepareMessage(message) {
+    const detail = await this.messageDetail(message);
+    const files = detail.files ?? detail.piecesJointes ?? [];
+    if (!Array.isArray(files)) throw new Error('EcoleDirecte : format de pièces jointes invalide');
+    const attachments = []; let total = 0;
+    for (const file of files) {
+      const remaining = this.config.attachmentsTotalMaxBytes - total;
+      if (remaining <= 0) throw new Error('EcoleDirecte : limite totale de pièces jointes dépassée (ATTACHMENTS_TOTAL_MAX_MB)');
+      const attachment = await this.downloadAttachment(file, detail, Math.min(this.config.attachmentMaxBytes, remaining));
+      total += attachment.blob.size;
+      attachments.push(attachment);
+    }
+    return { ...detail, attachments };
   }
 }

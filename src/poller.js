@@ -7,7 +7,8 @@ export async function pollOnce({ ed, discord, shouldStop = () => false }) {
     if (shouldStop()) break;
     if (message.id == null || String(message.id) === '') throw new Error('EcoleDirecte : message sans identifiant');
     if (processed.has(String(message.id))) continue;
-    await discord.send(message);
+    const completeMessage = await ed.prepareMessage(message);
+    await discord.send(completeMessage);
     // Même en cas de SIGTERM pendant l'envoi, terminer le passage en lu du message envoyé.
     await ed.markAsRead(message);
     processed.add(String(message.id));

@@ -103,7 +103,7 @@ test('embed : HTML, mentions neutralisées, limites et texte complet', () => {
 
 test('contenu absent, date invalide et base64', () => {
   const empty = buildNotification({ id: 1, date: 'invalid' }, config());
-  assert.match(empty.payload.embeds[0].description, /non lu/);
+  assert.match(empty.payload.embeds[0].description, /pas de texte/);
   assert.equal(empty.payload.embeds[0].timestamp, undefined);
   const encoded = buildNotification({ id: 2, content: Buffer.from('<p>Bonjour</p>').toString('base64') }, { ...config(), encoding: 'base64' });
   assert.equal(encoded.payload.embeds[0].description, 'Bonjour');
@@ -166,6 +166,7 @@ test('ordre envoi puis lu, doublons du cycle et reprise sans fichier', async () 
   const events = []; const read = new Set();
   const messages = [{ id: 2 }, { id: 1 }, { id: 1 }];
   const ed = {
+    prepareMessage: async m => m,
     unreadMessages: async () => messages.filter(m => !read.has(m.id)),
     markAsRead: async m => { events.push(`read:${m.id}`); read.add(m.id); },
   };
@@ -177,7 +178,7 @@ test('ordre envoi puis lu, doublons du cycle et reprise sans fichier', async () 
 
 test('échec Discord : aucun passage en lu puis reprise au cycle suivant', async () => {
   const read = [];
-  const deps = { ed: { unreadMessages: async () => [{ id: 1 }], markAsRead: async m => read.push(m.id) },
+  const deps = { ed: { prepareMessage: async m => m, unreadMessages: async () => [{ id: 1 }], markAsRead: async m => read.push(m.id) },
     discord: { send: async () => { throw new Error('HTTP 500'); } } };
   await assert.rejects(pollOnce(deps), /500/);
   assert.equal(read.length, 0);
@@ -188,7 +189,7 @@ test('échec Discord : aucun passage en lu puis reprise au cycle suivant', async
 
 test('échec du passage en lu : cycle interrompu, message toujours non lu', async () => {
   const events = [];
-  const deps = { ed: { unreadMessages: async () => [{ id: 2 }, { id: 1 }],
+  const deps = { ed: { prepareMessage: async m => m, unreadMessages: async () => [{ id: 2 }, { id: 1 }],
     markAsRead: async () => { throw new Error('EcoleDirecte : erreur 500'); } },
     discord: { send: async m => events.push(m.id) } };
   await assert.rejects(pollOnce(deps), /500/);
@@ -198,7 +199,7 @@ test('échec du passage en lu : cycle interrompu, message toujours non lu', asyn
 
 test('arrêt pendant envoi : terminer le passage en lu avant de quitter', async () => {
   let stopping = false; const read = [];
-  const deps = { ed: { unreadMessages: async () => [{ id: 2 }, { id: 1 }], markAsRead: async m => read.push(m.id) },
+  const deps = { ed: { prepareMessage: async m => m, unreadMessages: async () => [{ id: 2 }, { id: 1 }], markAsRead: async m => read.push(m.id) },
     discord: { send: async () => { stopping = true; } }, shouldStop: () => stopping };
   assert.equal((await pollOnce(deps)).sent, 1);
   assert.deepEqual(read, [1]);
