@@ -4,10 +4,6 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
-    environment:
-      STATE_FILE: /app/data/state.json
-    volumes:
-      - notifications:/app/data
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -17,6 +13,3 @@ services:
       options:
         max-size: 10m
         max-file: '3'
-
-volumes:
-  notifications:

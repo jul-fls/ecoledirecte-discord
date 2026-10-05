@@ -73,26 +73,43 @@ export class EcoleDirecte {
     this.token = token;
   }
 
-  async unreadMessages() {
-    // Une reconnexion au maximum par cycle, et reconstruction de l'URL avec le nouvel ID.
+  async authenticatedRequest(endpoint, data, params) {
+    // Une reconnexion au maximum par opération, avec reconstruction de l'URL.
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!this.token) await this.login();
       try {
-        const result = await this.request(this.url(this.config.apip,
-          `enseignants/${encodeURIComponent(this.id)}/messages.awp`, {
-            force: 'true', typeRecuperation: 'received', idClasseur: '0',
-            orderBy: 'date', order: 'desc', query: '', onlyRead: '',
-            getAll: '1', verbe: 'get',
-          }), {}, { 'X-Token': this.token });
+        const result = await this.request(this.url(this.config.apip, endpoint(this.id), params),
+          data, { 'X-Token': this.token });
         if (result.token) this.token = result.token;
-        const messages = result.data?.messages?.received;
-        if (!Array.isArray(messages)) throw new Error('EcoleDirecte : format de messagerie inattendu');
-        return messages.filter(message => message.read === false);
+        return result;
       } catch (error) {
-        if (![520, 401, 403].includes(error.code)) throw error;
+        if (![520, 525, 401, 403].includes(error.code)) throw error;
         this.token = null;
         if (attempt === 1) throw error;
       }
     }
+  }
+
+  async unreadMessages() {
+    const result = await this.authenticatedRequest(
+      id => `enseignants/${encodeURIComponent(id)}/messages.awp`,
+      { anneeMessages: this.config.messagesYear || '' }, {
+        force: 'true', typeRecuperation: 'received', idClasseur: '0',
+        orderBy: 'date', order: 'desc', query: '', onlyRead: '', getAll: '1', verbe: 'get',
+      });
+    this.messagesYear = result.data?.anneeMessages || this.config.messagesYear || '';
+    const messages = result.data?.messages?.received;
+    if (!Array.isArray(messages)) throw new Error('EcoleDirecte : format de messagerie inattendu');
+    return messages.filter(message => message.read === false);
+  }
+
+  async markAsRead(message) {
+    if (message.id == null || String(message.id) === '') throw new Error('EcoleDirecte : message sans identifiant');
+    // Même action que le bouton « Marquer comme lu », sans ouvrir le détail avant l'envoi Discord.
+    await this.authenticatedRequest(
+      id => `enseignants/${encodeURIComponent(id)}/messages.awp`, {
+        action: 'marquerCommeLu', ids: [message.id],
+        anneeMessages: message.anneeMessages || this.messagesYear || this.config.messagesYear || '',
+      }, { verbe: 'put' });
   }
 }

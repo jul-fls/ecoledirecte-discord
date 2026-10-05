@@ -1,13 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import { readConfig } from '../src/config.js';
 import { EcoleDirecte } from '../src/ecoledirecte.js';
 import { Discord, buildNotification, readableText } from '../src/discord.js';
-import { State, scopeFor } from '../src/state.js';
-import { pollOnce, StateWriteError } from '../src/poller.js';
+import { pollOnce } from '../src/poller.js';
 
 const config = () => readConfig({
   ECOLEDIRECTE_IDENTIFIANT: 'test', ECOLEDIRECTE_MDP: 'secret',
@@ -137,40 +133,72 @@ test('Discord : envoi long multipart et échec sans confirmation', async () => {
   await assert.rejects(discord.send({ id: 1 }), /500/);
 });
 
-test('état persistant : ordre, dédoublonnage après redémarrage et isolation', async t => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'ed-discord-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const cfg = config(); const file = path.join(dir, 'state.json');
-  const state = new State(file); await state.load();
-  const sent = [];
-  const ed = { id: 2, unreadMessages: async () => [{ id: 2 }, { id: 1 }, { id: 1 }] };
-  const discord = { send: async message => sent.push(message.id) };
-  const deps = { config: cfg, state, ed, discord };
-  assert.equal((await pollOnce(deps)).sent, 2);
-  assert.deepEqual(sent, [1, 2]);
-  const reloaded = new State(file); await reloaded.load();
-  assert.equal((await pollOnce({ ...deps, state: reloaded })).sent, 0);
-  assert.equal(reloaded.has(scopeFor({ ...cfg, profile: 'P' }, 2), 1), false);
-  const raw = await readFile(file, 'utf8');
-  assert.ok(!raw.includes('secret') && !raw.includes('test-token'));
-  await writeFile(file, '{broken');
-  await assert.rejects(new State(file).load(), /JSON invalide/);
+test('passage en lu : action, identifiant, année et token renouvelé', async () => {
+  const calls = [];
+  const ed = new EcoleDirecte(config(), async (url, options) => {
+    calls.push({ url, options }); return json({ code: 200, token: 'rotated' });
+  });
+  ed.token = 'old'; ed.id = 42; ed.messagesYear = '2026-2027';
+  await ed.markAsRead({ id: 7 });
+  assert.equal(calls[0].url.pathname, '/v3/enseignants/42/messages.awp');
+  assert.equal(calls[0].url.searchParams.get('verbe'), 'put');
+  assert.equal(calls[0].options.headers['X-Token'], 'old');
+  assert.deepEqual(JSON.parse(calls[0].options.body.get('data')), {
+    action: 'marquerCommeLu', ids: [7], anneeMessages: '2026-2027',
+  });
+  assert.equal(ed.token, 'rotated');
 });
 
-test('échec Discord : message non mémorisé puis repris au cycle suivant', async () => {
-  const sent = new Set(); const cfg = config();
-  const deps = { config: cfg, ed: { id: 1, unreadMessages: async () => [{ id: 1 }] },
-    state: { has: (_scope, id) => sent.has(id), mark: async (_scope, id) => sent.add(id) },
+test('expiration pendant le passage en lu : reconnexion sans renvoyer sur Discord', async () => {
+  const calls = [];
+  const responses = [json({ code: 525 }), gtk(),
+    json({ code: 200, token: 'new', data: { accounts: [{ typeCompte: 'A', id: 77 }] } }), json({ code: 200 })];
+  const ed = new EcoleDirecte(config(), async (url, options) => { calls.push({ url, options }); return responses.shift(); });
+  ed.token = 'expired'; ed.id = 1;
+  await ed.markAsRead({ id: 7, anneeMessages: '2026-2027' });
+  assert.match(calls.at(-1).url.pathname, /enseignants\/77\//);
+  assert.equal(JSON.parse(calls.at(-1).options.body.get('data')).anneeMessages, '2026-2027');
+  assert.equal(calls.at(-1).options.headers['X-Token'], 'new');
+});
+
+test('ordre envoi puis lu, doublons du cycle et reprise sans fichier', async () => {
+  const events = []; const read = new Set();
+  const messages = [{ id: 2 }, { id: 1 }, { id: 1 }];
+  const ed = {
+    unreadMessages: async () => messages.filter(m => !read.has(m.id)),
+    markAsRead: async m => { events.push(`read:${m.id}`); read.add(m.id); },
+  };
+  const discord = { send: async m => events.push(`send:${m.id}`) };
+  assert.deepEqual(await pollOnce({ ed, discord }), { unread: 3, sent: 2 });
+  assert.deepEqual(events, ['send:1', 'read:1', 'send:2', 'read:2']);
+  assert.deepEqual(await pollOnce({ ed, discord }), { unread: 0, sent: 0 });
+});
+
+test('échec Discord : aucun passage en lu puis reprise au cycle suivant', async () => {
+  const read = [];
+  const deps = { ed: { unreadMessages: async () => [{ id: 1 }], markAsRead: async m => read.push(m.id) },
     discord: { send: async () => { throw new Error('HTTP 500'); } } };
   await assert.rejects(pollOnce(deps), /500/);
-  assert.equal(sent.size, 0);
+  assert.equal(read.length, 0);
   deps.discord.send = async () => {};
   assert.equal((await pollOnce(deps)).sent, 1);
+  assert.deepEqual(read, [1]);
 });
 
-test('échec persistance fatal et arrêt avant le message suivant', async () => {
-  const deps = { config: config(), ed: { id: 1, unreadMessages: async () => [{ id: 1 }] },
-    state: { has: () => false, mark: async () => { throw new Error('disk full'); } }, discord: { send: async () => {} } };
-  await assert.rejects(pollOnce(deps), StateWriteError);
+test('échec du passage en lu : cycle interrompu, message toujours non lu', async () => {
+  const events = [];
+  const deps = { ed: { unreadMessages: async () => [{ id: 2 }, { id: 1 }],
+    markAsRead: async () => { throw new Error('EcoleDirecte : erreur 500'); } },
+    discord: { send: async m => events.push(m.id) } };
+  await assert.rejects(pollOnce(deps), /500/);
+  assert.deepEqual(events, [1]);
   assert.equal((await pollOnce({ ...deps, shouldStop: () => true })).sent, 0);
+});
+
+test('arrêt pendant envoi : terminer le passage en lu avant de quitter', async () => {
+  let stopping = false; const read = [];
+  const deps = { ed: { unreadMessages: async () => [{ id: 2 }, { id: 1 }], markAsRead: async m => read.push(m.id) },
+    discord: { send: async () => { stopping = true; } }, shouldStop: () => stopping };
+  assert.equal((await pollOnce(deps)).sent, 1);
+  assert.deepEqual(read, [1]);
 });
