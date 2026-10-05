@@ -202,3 +202,50 @@ test('arrêt pendant envoi : terminer le passage en lu avant de quitter', async 
   assert.equal((await pollOnce(deps)).sent, 1);
   assert.deepEqual(read, [1]);
 });
+
+test('HTTP 403 au bootstrap : étape identifiée, sans divulguer le corps', async () => {
+  const ed = new EcoleDirecte(config(), async (_url, options) => {
+    assert.equal(options.headers.Origin, 'https://www.ecoledirecte.com');
+    assert.equal(options.headers.Referer, 'https://www.ecoledirecte.com/');
+    assert.equal(options.headers['Content-Type'], undefined);
+    return new Response('<html>secret-cookie</html>', { status: 403, headers: { 'Content-Type': 'text/html' } });
+  });
+  await assert.rejects(ed.login(), error => /initialisation GTK : HTTP 403.*HTML/.test(error.message)
+    && !error.message.includes('secret-cookie'));
+});
+
+test('HTTP 403 à la connexion distinct d’une erreur API 403', async () => {
+  let responses = [gtk(), json({ message: 'secret' }, 403)];
+  const ed = new EcoleDirecte(config(), async () => responses.shift());
+  await assert.rejects(ed.login(), /connexion : HTTP 403/);
+  responses = [gtk(), json({ code: 403, message: 'secret' })];
+  await assert.rejects(ed.login(), error => /connexion : API 403/.test(error.message) && !error.message.includes('secret'));
+});
+
+test('HTTP 403 à la messagerie : pas de login supplémentaire', async () => {
+  let calls = 0;
+  const ed = new EcoleDirecte(config(), async () => { calls++; return json({}, 403); });
+  ed.token = 'token'; ed.id = 42;
+  await assert.rejects(ed.unreadMessages(), /lecture des messages : HTTP 403/);
+  assert.equal(calls, 1);
+});
+
+test('cookies de session conservés et actualisés pour profil et messagerie', async () => {
+  const calls = [];
+  const login = json({ code: 200, token: 'base', data: { accounts: [{ typeCompte: 'P', id: 1 }] } });
+  login.headers.append('Set-Cookie', 'SESSION=renewed; Path=/; HttpOnly');
+  const switched = json({ code: 200, token: 'new', data: { id: 2 } });
+  switched.headers.append('Set-Cookie', 'SESSION=switched; Path=/');
+  const responses = [gtk(), login, switched, json({ code: 200, data: { messages: { received: [] } } })];
+  const ed = new EcoleDirecte(config(), async (_url, options) => { calls.push(options); return responses.shift(); });
+  await ed.unreadMessages();
+  assert.equal(calls[2].headers.Cookie, 'GTK=test-gtk; SESSION=renewed');
+  assert.equal(calls[3].headers.Cookie, 'GTK=test-gtk; SESSION=switched');
+  assert.equal(calls[3].headers.Origin, 'https://www.ecoledirecte.com');
+});
+
+test('code API non numérique non propagé comme texte distant', async () => {
+  const ed = new EcoleDirecte(config(), async () => json({ code: 'secret-token' }));
+  await assert.rejects(ed.request(new URL('https://api.ecoledirecte.com'), {}), error =>
+    error.message.includes('inconnu') && !error.message.includes('secret-token'));
+});

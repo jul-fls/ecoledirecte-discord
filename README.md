@@ -56,7 +56,7 @@ Sans `ECOLEDIRECTE_ACCOUNT_ID`, le service choisit le premier compte du profil d
 - Ordre ancien → récent, un envoi à la fois. Pour chaque message : confirmation Discord avec `wait=true`, puis action EcoleDirecte `marquerCommeLu` (`verbe=put`, `ids: [id]`, `anneeMessages`).
 - Un échec Discord empêche le passage en lu et interrompt le cycle ; le message reste à traiter au cycle suivant. Un échec du passage en lu est également signalé et interrompt le cycle. Les réponses Discord 429 déclenchent jusqu'à deux nouvelles tentatives suivant `retry_after` (30 secondes maximum par attente).
 - Un message confirmé comme lu disparaît des notifications suivantes, y compris après redémarrage. Si vous le remettez manuellement en non lu, il sera renvoyé puis marqué comme lu à nouveau.
-- Token expiré (codes ED 520/525, HTTP 401/403) : une reconnexion et restauration du profil par opération. L'opération de passage en lu peut être retentée sans renvoyer la notification Discord. Les tokens retournés avec une réponse réussie sont actualisés en mémoire.
+- Token expiré (codes ED 520/521/525, HTTP 401) : une reconnexion et restauration du profil par opération. L'opération de passage en lu peut être retentée sans renvoyer la notification Discord. Les tokens retournés avec une réponse réussie sont actualisés en mémoire. Un HTTP 403 est signalé sans lancer de connexion supplémentaire.
 - Cycles sans chevauchement. Un cycle long reporte le suivant ; le service ne lance pas de rafale de rattrapage. SIGTERM/SIGINT termine l'envoi courant et empêche le démarrage du message suivant.
 
 Une coupure entre l'acceptation du webhook et le passage en lu, une réponse Discord perdue après acceptation ou un échec du passage en lu peut produire un doublon au prochain cycle. Discord et EcoleDirecte ne partagent pas de transaction atomique. Le service privilégie la reprise des messages encore non lus.
@@ -75,6 +75,18 @@ node --test
 Si npm est disponible, `npm start` et `npm test` sont équivalents. Rien à installer. Les tests utilisent des réponses simulées, sans identifiants réels et sans publier sur Discord.
 
 ## Origine et limites de l'intégration
+
+### Diagnostic de connexion
+
+Les erreurs indiquent désormais l'étape (`initialisation GTK`, `connexion`, `changement de profil`, `lecture des messages`, `passage du message en lu`) et distinguent le statut **HTTP** du code **API EcoleDirecte**. Les réponses HTTP non réussies indiquent également si le serveur renvoie du HTML ou du JSON, sans afficher le corps, les cookies, les identifiants ou les tokens.
+
+Par exemple, `initialisation GTK : HTTP 403 (réponse HTML)` signifie que le refus arrive avant toute transmission du mot de passe. `connexion : API 250` indique une validation interactive de connexion. `lecture des messages : HTTP 403` situe le refus après authentification et sélection du profil ; le seul code ne permet pas de décider s'il vient du filtrage réseau ou des droits du compte.
+
+Le client transmet `Origin` et `Referer` EcoleDirecte, conserve les cookies de session uniquement en mémoire et les actualise à chaque réponse. Le GET initial GTK ne comporte pas d'en-tête `Content-Type` de formulaire, réservé aux POST.
+
+Après mise à jour, reconstruire l'image locale avec `docker compose up -d --build`, puis consulter `docker compose logs --tail=30 notifier`. Si vous utilisez une image publiée plutôt que le build local, il faut publier la nouvelle version et recréer le conteneur avec cette image ; reconstruire localement ne met pas automatiquement à jour le registre.
+
+### Code extrait
 
 Extraction du dépôt SAC : `src/scripts/auto/login.script.js` (GTK, login, `switchProfile`), `src/API_SAC/commons/helpers.common.js` (POST form-urlencoded, reconnexion), `src/API_SAC/commons/constants.common.js` (endpoint enseignants), `src/scripts/auto/get_data.script.js` (liste `received`, `read === false`). Aucun import SAC, Prisma ou frontend n'est nécessaire.
 
